@@ -1,97 +1,186 @@
 import os
-from dotenv import load_dotenv
-
-load_dotenv()
-
-league_id = os.environ.get("league_id")
-espn_s2 = os.environ.get("ESPN_S2")
-swid = os.environ.get("SWID")
-
 import json
+from dotenv import load_dotenv
 from espn_api.hockey import League
 from espn_api.hockey.constant import POSITION_MAP, PRO_TEAM_MAP
 
-YEAR = 2026
-league = League(league_id=league_id, year=YEAR, espn_s2=espn_s2, swid=swid)
+load_dotenv()
 
-TOTAL_SPLIT_ID = f"00{YEAR}"  # e.g. '002026'
+league = League(
+    league_id=os.environ["league_id"],
+    year=2026,
+    espn_s2=os.environ["ESPN_S2"],
+    swid=os.environ["SWID"],
+)
+
+YEAR = 2026
+TOTAL_SPLIT_ID = f"00{YEAR}"
+MIN_GP = 25
 
 
 def fetch_top_players(league, size):
     filters = {
         "players": {
-            "filterStatus": {"value": ["FREEAGENT", "WAIVERS", "ONTEAM"]},
+            "filterStatus": {
+                "value": ["FREEAGENT", "WAIVERS", "ONTEAM"]
+            },
             "limit": size,
             "offset": 0,
             "sortDraftRanks": {
-                "sortPriority": 100,
+                "sortPriority": 1000,
                 "sortAsc": True,
                 "value": "STANDARD",
             },
         }
     }
+
     headers = {"x-fantasy-filter": json.dumps(filters)}
-    params = {"view": "kona_player_info", "scoringPeriodId": league.current_week}
-    data = league.espn_request.league_get(params=params, headers=headers)
-    return data["players"]
+    params = {
+        "view": "kona_player_info",
+        "scoringPeriodId": league.current_week,
+    }
+
+    return league.espn_request.league_get(
+        params=params,
+        headers=headers
+    )["players"]
 
 
-raw_players = fetch_top_players(league, size=100)
+raw_players = fetch_top_players(league, 1000)
 
-MIN_GP = 40
+print("Fetched:", len(raw_players))
+
+# ------------------------------------
+# Override scoring settings here
+# statId : fantasy points
+# ------------------------------------
+
+SCORING = {
+    13: 3.0,     # Goals
+    14: 2.0,     # Assists
+    15: 0.1,     # Plus/Minus
+    29: 0.3,     # Shots
+    31: 0.2,     # Hits
+    32: 0.9,     # Blocks
+    33: 0.0,     # Defenseman Point
+    38: 0.3,     # PP Points
+    39: 0.5,     # SH Points
+
+    # Goalies
+    1: 2.0,      # Wins
+    4: -1.0,     # Goals Against
+    6: 0.3,      # Saves
+    7: 2.0,      # Shutouts
+    9: 1.0,      # OTL
+}
+
+
+def calculate_points(stats, scoring, position):
+    total = 0
+
+    for stat_id, pts in scoring.items():
+
+        value = stats.get(str(stat_id), 0)
+
+        # Only defensemen receive defenseman point bonus
+        if stat_id == 33 and position != "Defense":
+            continue
+
+        total += value * pts
+
+    return total
+
 
 results = []
 
 for entry in raw_players:
+
     player = entry.get("playerPoolEntry", {}).get("player") or entry.get("player")
+
     if not player:
         continue
 
-    name = player.get("fullName")
-    pos = POSITION_MAP.get(player.get("defaultPositionId"), "Unknown")
-    pro_team = PRO_TEAM_MAP.get(player.get("proTeamId"), "FA")
+    name = player["fullName"]
+    pos = POSITION_MAP.get(player["defaultPositionId"], "Unknown")
+    team = PRO_TEAM_MAP.get(player["proTeamId"], "FA")
+
     is_goalie = pos == "Goalie"
 
-    espn_total, espn_gp = 0, 0
+    stats = None
 
-    for split in player.get("stats", []):
-        if split.get("id") == TOTAL_SPLIT_ID:
-            espn_total = split.get("appliedTotal", 0)
-
-            stats_dict = split.get("stats", {})
-            gp_key = "0" if is_goalie else "34"
-            espn_gp = stats_dict.get(gp_key, 0)
-
+    for split in player["stats"]:
+        if split["id"] == TOTAL_SPLIT_ID:
+            stats = split["stats"]
             break
 
-    espn_avg = espn_total / espn_gp if espn_gp else 0
+    if stats is None:
+        continue
+
+    gp_key = "0" if is_goalie else "34"
+
+    gp = stats.get(gp_key, 0)
+
+    if gp == 0:
+        continue
+
+    fantasy_total = calculate_points(stats, SCORING, pos)
+
+    fantasy_avg = fantasy_total / gp
 
     if is_goalie:
-        proj_gp = espn_gp
-        proj_total = espn_total
-        proj_avg = espn_avg
+        proj_gp = gp
+        proj_total = fantasy_total
     else:
         proj_gp = 82
-        proj_avg = espn_avg
-        proj_total = proj_avg * 82
+        proj_total = fantasy_avg * 82
 
     results.append({
         "name": name,
         "pos": pos,
-        "team": pro_team,
-        "proj_total": round(proj_total, 1),
+        "team": team,
+        "gp": gp,
+        "avg": fantasy_avg,
+        "proj_total": proj_total,
         "proj_gp": proj_gp,
-        "proj_avg": round(proj_avg, 2),
-        "is_goalie": is_goalie,
-        "raw_gp": espn_gp,
+        "goalie": is_goalie,
     })
 
-results = [p for p in results if p["is_goalie"] or p["raw_gp"] >= MIN_GP]
+
+# print("Raw players:", len(raw_players))
+# print("Processed:", len(results))
+
+# before = len(results)
+
+results = [
+    p for p in results
+    if p["goalie"] or p["gp"] >= MIN_GP
+]
+
+# print("After GP filter:", len(results))
+
 results.sort(key=lambda x: x["proj_total"], reverse=True)
 
-print(f"{'Rank':<5}{'Name':<22}{'Pos':<15}{'Team':<24}{'ProjTotal':>10}{'ProjGP':>8}{'ProjAvg':>9}")
-print("-" * 100)
+results = results[:300]
+
+print(
+    f"{'Rank':<5}"
+    f"{'Name':<22}"
+    f"{'Pos':<12}"
+    f"{'Team':<24}"
+    f"{'ProjTotal':>11}"
+    f"{'GP':>6}"
+    f"{'Avg':>8}"
+)
+
+print("-" * 90)
 
 for i, p in enumerate(results, start=1):
-    print(f"{i:<5}{p['name']:<22}{p['pos']:<15}{p['team']:<24}"
-          f"{p['proj_total']:>10.1f}{p['proj_gp']:>8}{p['proj_avg']:>9.2f}")
+    print(
+        f"{i:<5}"
+        f"{p['name']:<22}"
+        f"{p['pos']:<12}"
+        f"{p['team']:<24}"
+        f"{p['proj_total']:>11.1f}"
+        f"{int(p['proj_gp']):>6}"
+        f"{p['avg']:>8.2f}"
+    )
