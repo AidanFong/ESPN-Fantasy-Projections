@@ -1,5 +1,6 @@
 import os
 import json
+import csv
 from dotenv import load_dotenv
 from espn_api.hockey import League
 from espn_api.hockey.constant import POSITION_MAP, PRO_TEAM_MAP
@@ -21,9 +22,7 @@ MIN_GP = 25
 def fetch_top_players(league, size):
     filters = {
         "players": {
-            "filterStatus": {
-                "value": ["FREEAGENT", "WAIVERS", "ONTEAM"]
-            },
+            "filterStatus": {"value": ["FREEAGENT", "WAIVERS", "ONTEAM"]},
             "limit": size,
             "offset": 0,
             "sortDraftRanks": {
@@ -40,39 +39,49 @@ def fetch_top_players(league, size):
         "scoringPeriodId": league.current_week,
     }
 
-    return league.espn_request.league_get(
-        params=params,
-        headers=headers
-    )["players"]
+    return league.espn_request.league_get(params=params, headers=headers)["players"]
 
 
 raw_players = fetch_top_players(league, 1000)
 
 print("Fetched:", len(raw_players))
 
-# ------------------------------------
 # Override scoring settings here
-# statId : fantasy points
-# ------------------------------------
 
 SCORING = {
-    13: 3.0,     # Goals
-    14: 2.0,     # Assists
-    15: 0.1,     # Plus/Minus
-    29: 0.3,     # Shots
-    31: 0.2,     # Hits
-    32: 0.9,     # Blocks
-    33: 0.0,     # Defenseman Point
-    38: 0.3,     # PP Points
-    39: 0.5,     # SH Points
-
+    13: 3.0,  # Goals
+    14: 2.0,  # Assists
+    15: 0.1,  # Plus/Minus
+    29: 0.3,  # Shots
+    31: 0.2,  # Hits
+    32: 0.9,  # Blocks
+    33: 0.0,  # Defenseman Point
+    38: 0.3,  # PP Points
+    39: 0.5,  # SH Points
     # Goalies
-    1: 2.0,      # Wins
-    4: -1.0,     # Goals Against
-    6: 0.3,      # Saves
-    7: 2.0,      # Shutouts
-    9: 1.0,      # OTL
+    1: 2.0,  # Wins
+    4: -1.0,  # Goals Against
+    6: 0.3,  # Saves
+    7: 2.0,  # Shutouts
+    9: 1.0,  # OTL
 }
+
+STAT_COLUMNS = [
+    ("13", "G"),
+    ("14", "A"),
+    ("15", "+/-"),
+    ("29", "SOG"),
+    ("31", "HIT"),
+    ("32", "BLK"),
+    # ("33", "DPT"),
+    ("38", "PPP"),
+    ("39", "SHP"),
+    ("1", "W"),
+    ("4", "GA"),
+    ("6", "SV"),
+    ("7", "SO"),
+    ("9", "OTL"),
+]
 
 
 def calculate_points(stats, scoring, position):
@@ -131,19 +140,23 @@ for entry in raw_players:
         proj_gp = gp
         proj_total = fantasy_total
     else:
-        proj_gp = 82
-        proj_total = fantasy_avg * 82
+        proj_gp = 84
+        proj_total = fantasy_avg * proj_gp
 
-    results.append({
-        "name": name,
-        "pos": pos,
-        "team": team,
-        "gp": gp,
-        "avg": fantasy_avg,
-        "proj_total": proj_total,
-        "proj_gp": proj_gp,
-        "goalie": is_goalie,
-    })
+    results.append(
+        {
+            "name": name,
+            "pos": pos,
+            "team": team,
+            "gp": gp,
+            "avg": fantasy_avg,
+            "proj_total": proj_total,
+            "proj_gp": proj_gp,
+            "goalie": is_goalie,
+            # Raw stats
+            "stats": stats,
+        }
+    )
 
 
 # print("Raw players:", len(raw_players))
@@ -151,10 +164,7 @@ for entry in raw_players:
 
 # before = len(results)
 
-results = [
-    p for p in results
-    if p["goalie"] or p["gp"] >= MIN_GP
-]
+results = [p for p in results if p["goalie"] or p["gp"] >= MIN_GP]
 
 # print("After GP filter:", len(results))
 
@@ -162,25 +172,95 @@ results.sort(key=lambda x: x["proj_total"], reverse=True)
 
 results = results[:300]
 
-print(
+# Export to csv
+with open("fantasy_rankings.csv", "w", newline="", encoding="utf-8") as csvfile:
+
+    writer = csv.writer(csvfile)
+
+    # Header
+    header = [
+        "Rank",
+        "Name",
+        "Position",
+        "Team",
+        "Projected Total",
+        "Actual GP",
+        "Projected GP",
+        "Fantasy Avg",
+    ]
+
+    # Add all stat column names
+    for _, label in STAT_COLUMNS:
+        header.append(label)
+
+    writer.writerow(header)
+
+    # Player rows
+    for rank, p in enumerate(results, start=1):
+
+        row = [
+            rank,
+            p["name"],
+            p["pos"],
+            p["team"],
+            round(p["proj_total"], 1),
+            int(p["gp"]),
+            int(p["proj_gp"]),
+            round(p["avg"], 2),
+        ]
+
+        # Add each raw stat
+        for stat_id, _ in STAT_COLUMNS:
+            value = p["stats"].get(stat_id, 0)
+
+            if value == 0:
+                row.append("")
+            else:
+                row.append(int(value))
+
+        writer.writerow(row)
+
+print("Exported fantasy_rankings.csv")
+
+# Formatted print in terminal
+# Column headers
+header = (
     f"{'Rank':<5}"
-    f"{'Name':<22}"
+    f"{'Name':<20}"
     f"{'Pos':<12}"
     f"{'Team':<24}"
-    f"{'ProjTotal':>11}"
-    f"{'GP':>6}"
-    f"{'Avg':>8}"
+    f"{'ProjTotal':>10}"
+    f"{'ActualGP':>9}"
+    f"{'ProjGP':>8}"
+    f"{'Avg':>7}"
 )
 
-print("-" * 90)
+for _, label in STAT_COLUMNS:
+    header += f"{label:>5}"
 
+print(header)
+print("-" * len(header))
+
+# Print players
 for i, p in enumerate(results, start=1):
-    print(
+
+    row = (
         f"{i:<5}"
-        f"{p['name']:<22}"
+        f"{p['name']:<20}"
         f"{p['pos']:<12}"
         f"{p['team']:<24}"
-        f"{p['proj_total']:>11.1f}"
-        f"{int(p['proj_gp']):>6}"
+        f"{p['proj_total']:>10.1f}"
+        f"{int(p['gp']):>9}"
+        f"{int(p['proj_gp']):>8}"
         f"{p['avg']:>8.2f}"
     )
+
+    for stat_id, _ in STAT_COLUMNS:
+        value = p["stats"].get(stat_id, 0)
+
+        if value == 0:
+            row += f"{'':>5}"
+        else:
+            row += f"{int(value):>5}"
+
+    print(row)
