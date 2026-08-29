@@ -170,7 +170,7 @@ results = [p for p in results if p["goalie"] or p["gp"] >= MIN_GP]
 
 results.sort(key=lambda x: x["proj_total"], reverse=True)
 
-results = results[:300]
+results = results[:400]
 
 # Export to csv
 with open("fantasy_rankings.csv", "w", newline="", encoding="utf-8") as csvfile:
